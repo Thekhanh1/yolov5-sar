@@ -14,7 +14,6 @@ import platform
 import sys
 from copy import deepcopy
 from pathlib import Path
-
 import torch
 from torch import nn
 
@@ -49,6 +48,8 @@ from models.common import (
     GhostConv,
     Proto,
 )
+
+from models.common import Select, shuffleBackBone, LCSP, HSPP, se, cbam, ca
 from models.experimental import MixConv2d
 from utils.autoanchor import check_anchor_order
 from utils.general import LOGGER, check_version, check_yaml, colorstr, make_divisible, print_args
@@ -418,19 +419,31 @@ def parse_model(d, ch):
             nn.ConvTranspose2d,
             DWConvTranspose2d,
             C3x,
+            LCSP,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, ch_mul)
 
             args = [c1, c2, *args[1:]]
-            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x}:
+            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x, LCSP}:
                 args.insert(2, n)  # number of repeats
                 n = 1
+        elif m is shuffleBackBone:
+            c2 = [116, 232, 464]  # ShuffleNetV2 x1.0 stage2/3/4 output widths (P3, P4, P5)
+        elif m is Select:
+            c2 = ch[f][args[0]]  # pull this tap's real channel count out of the backbone's list
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is HSPP:
+            c1 = ch[f]
+            args = [c1, *args]
+            c2 = c1
+        elif m in {ca, cbam, se}:
+            c1, c2 = ch[f], ch[f]
+            args = [c1, *args]
         # TODO: channel, gw, gd
         elif m in {Detect, Segment}:
             args.append([ch[x] for x in f])

@@ -1138,3 +1138,256 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+
+import torchvision.models as models
+
+
+class shuffleBackBone(nn.Module):
+    def __init__(self, pretrained=True):
+        super().__init__()
+        weights = models.ShuffleNet_V2_X1_0_Weights.DEFAULT if pretrained else None
+        base = models.shufflenet_v2_x1_0(weights=weights)
+
+        self.stage1 = nn.Sequential(base.conv1, base.maxpool)
+        self.stage2 = base.stage2
+        self.stage3 = base.stage3
+        self.stage4 = base.stage4
+
+    def forward(self, x):
+        x = self.stage1(x)
+        p3 = self.stage2(x)
+        p4 = self.stage3(p3)
+        p5 = self.stage4(p4)
+        return [p3, p4, p5]
+
+
+class Select(nn.Module):
+    """Picks one tensor out of a list returned by a prior multi-output module (e.g. a multi-scale backbone).
+
+    Lets a single module that returns several feature maps (like shuffleBackBone's [p3, p4, p5]) be
+    "unpacked" into separate, individually-addressable layers in a YOLOv5 yaml, each with its own
+    'from' index and its own tracked channel count.
+    """
+
+    def __init__(self, index):
+        """index: which element of the input list to return (0=P3, 1=P4, 2=P5 for shuffleBackBone)."""
+        super().__init__()
+        self.index = index
+
+    def forward(self, x):
+        return x[self.index]
+
+
+# ------------------------------------LCSP------------------------------------------
+
+
+class LConv(nn.Module):
+    def __init__(self, inputCh, outputCh, kernelSize=3, ratio=2, stride=1):
+        super().__init__()
+        self.m = outputCh // ratio
+
+        self.expensive_conv = nn.Conv2d(
+            inputCh, self.m, kernel_size=kernelSize, padding=kernelSize // 2, bias=False, stride=stride
+        )
+
+        self.cheap_conv = nn.Conv2d(
+            self.m, self.m * (ratio - 1), kernel_size=3, padding=1, groups=self.m, bias=False, stride=1
+        )
+
+    def forward(self, x):
+        y_prime = self.expensive_conv(x)
+        cheap_features = self.cheap_conv(y_prime)
+        out = torch.cat([y_prime, cheap_features], dim=1)
+        return out
+
+
+class LBL(nn.Module):
+    def __init__(self, inputCh, outputCh, kernelSize, stride=1):
+        super().__init__()
+        self.conv = LConv(inputCh, outputCh, kernelSize, stride=stride)
+        self.BNorm = nn.BatchNorm2d(outputCh)
+        self.activate = nn.LeakyReLU(0.1)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.BNorm(x)
+        x = self.activate(x)
+        return x
+
+
+class lBottleneck(nn.Module):
+    def __init__(self, inputCh):
+        super().__init__()
+        self.lbl1 = LBL(inputCh, inputCh, 1)
+        self.lbl2 = LBL(inputCh, inputCh, 3)
+
+    def forward(self, x):
+        x = self.lbl1(x)
+        residual = x
+        x = self.lbl2(x)
+        x = x + residual
+        return x
+
+
+class LCSP(nn.Module):
+    def __init__(self, inputCh, outputCh, n=1):
+        super().__init__()
+        hiddenCh = outputCh // 2
+        self.branch1 = LBL(inputCh, hiddenCh, 1)
+        self.branch2 = LBL(inputCh, hiddenCh, 1)
+        self.bottleneck = nn.Sequential(*[lBottleneck(hiddenCh) for _ in range(n)])
+        self.final = LBL(outputCh, outputCh, 1)
+
+    def forward(self, x):
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x2 = self.bottleneck(x2)
+        x = torch.cat([x1, x2], dim=1)
+        x = self.final(x)
+        return x
+
+
+class HSPP(nn.Module):
+    def __init__(self, inputCh, kernel_sizes=(5, 9, 13)):
+        super().__init__()
+        squeezeCh = inputCh // 2
+        self.squeeze = nn.Sequential(
+            nn.Conv2d(inputCh, squeezeCh, kernel_size=1, bias=False),
+            nn.BatchNorm2d(squeezeCh),
+            nn.LeakyReLU(0.1, inplace=True),
+        )
+        self.maxpools = nn.ModuleList([nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2) for k in kernel_sizes])
+        self.avgpools = nn.ModuleList([nn.AvgPool2d(kernel_size=k, stride=1, padding=k // 2) for k in kernel_sizes])
+        self.compress = LBL(squeezeCh * (1 + 2 * len(kernel_sizes)), inputCh, kernelSize=1)
+
+    def forward(self, x):
+        x = self.squeeze(x)
+        pooled = [p(x) for p in self.maxpools] + [p(x) for p in self.avgpools]
+        x = torch.cat([x] + pooled, dim=1)
+        x = self.compress(x)
+        return x
+
+
+# -------------------------------------SE-------------------------------------------
+
+
+class se(nn.Module):
+    def __init__(self, inputCh, r=16):
+        super().__init__()
+        self.glPool = nn.AdaptiveAvgPool2d((1, 1))
+        self.bottleNeck = nn.Sequential(
+            nn.Conv2d(in_channels=inputCh, out_channels=inputCh // r, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=inputCh // r, out_channels=inputCh, kernel_size=1, bias=False),
+        )
+        self.Hsig = nn.Hardsigmoid()
+
+    def forward(self, x):
+        y = self.glPool(x)
+        y = self.bottleNeck(y)
+        y = self.Hsig(y)
+
+        return x * y
+
+
+# ------------------------------------CBAM------------------------------------------
+
+
+class cbamMlp(nn.Module):
+    def __init__(self, inputCh, r=16):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_channels=inputCh, out_channels=inputCh // r, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=inputCh // r, out_channels=inputCh, kernel_size=1, bias=False),
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class cbamCa(nn.Module):
+    def __init__(self, inputCh, r=16):
+        super().__init__()
+        self.maxPath = nn.AdaptiveMaxPool2d((1, 1))
+        self.avgPath = nn.AdaptiveAvgPool2d((1, 1))
+
+        self.MLP = cbamMlp(inputCh=inputCh, r=r)
+
+        self.Hsig = nn.Hardsigmoid()
+
+    def forward(self, x):
+        x1 = self.MLP(self.maxPath(x))
+        x2 = self.MLP(self.avgPath(x))
+
+        x = self.Hsig(x1 + x2)
+
+        return x
+
+
+class cbamSa(nn.Module):
+    def __init__(self, k=7):
+        super().__init__()
+        self.conv7 = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=k, padding=k // 2, bias=False)
+        self.hardsigmoid = nn.Hardsigmoid()
+
+    def forward(self, x):
+        a = torch.cat([x.mean(dim=1, keepdim=True), x.amax(dim=1, keepdim=True)], dim=1)
+
+        a = self.conv7(a)
+        a = self.hardsigmoid(a)
+
+        return x * a
+
+
+class cbam(nn.Module):
+    def __init__(self, inputCh, k=7, r=16):
+        super().__init__()
+        self.mc = cbamCa(inputCh=inputCh, r=r)
+        self.ms = cbamSa(k)
+
+    def forward(self, x):
+        x1 = self.mc(x) * x
+        return self.ms(x1) * x1
+
+
+# -------------------------------------CA-------------------------------------------
+
+
+class ca(nn.Module):
+    def __init__(self, inputCh, r=32):
+        super().__init__()
+        self.maxW = nn.AdaptiveAvgPool2d((1, None))
+        self.maxH = nn.AdaptiveAvgPool2d((None, 1))
+
+        self.pwConv = nn.Conv2d(in_channels=inputCh, out_channels=inputCh // r, kernel_size=1)
+
+        self.batchNorm = nn.BatchNorm2d(inputCh // r)
+        self.act = nn.Hardsigmoid()
+        self.convH = nn.Conv2d(in_channels=inputCh // r, out_channels=inputCh, kernel_size=1)
+        self.convW = nn.Conv2d(in_channels=inputCh // r, out_channels=inputCh, kernel_size=1)
+
+    def forward(self, x):
+        _, _, h, w = x.shape
+
+        xW = self.maxW(x)
+        xH = self.maxH(x)
+
+        xW = xW.permute(0, 1, 3, 2)
+
+        x_cat = torch.concat([xH, xW], dim=2)
+
+        x_cat = self.pwConv(x_cat)
+        x_cat = self.batchNorm(x_cat)
+        x_cat = self.act(x_cat)
+
+        xHn, xWn = torch.split(x_cat, [h, w], dim=2)
+
+        xWn = xWn.permute(0, 1, 3, 2)
+
+        gH = self.act(self.convH(xHn))
+        gW = self.act(self.convW(xWn))
+
+        y = gH * gW * x
+        return y
