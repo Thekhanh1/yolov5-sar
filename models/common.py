@@ -1140,7 +1140,7 @@ class Classify(nn.Module):
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
 
 
-import torchvision.models as models
+from torchvision import models
 
 
 class shuffleBackBone(nn.Module):
@@ -1165,13 +1165,13 @@ class shuffleBackBone(nn.Module):
 class Select(nn.Module):
     """Picks one tensor out of a list returned by a prior multi-output module (e.g. a multi-scale backbone).
 
-    Lets a single module that returns several feature maps (like shuffleBackBone's [p3, p4, p5]) be
-    "unpacked" into separate, individually-addressable layers in a YOLOv5 yaml, each with its own
-    'from' index and its own tracked channel count.
+    Lets a single module that returns several feature maps (like shuffleBackBone's [p3, p4, p5]) be "unpacked" into
+    separate, individually-addressable layers in a YOLOv5 yaml, each with its own 'from' index and its own tracked
+    channel count.
     """
 
     def __init__(self, index):
-        """index: which element of the input list to return (0=P3, 1=P4, 2=P5 for shuffleBackBone)."""
+        """Index: which element of the input list to return (0=P3, 1=P4, 2=P5 for shuffleBackBone)."""
         super().__init__()
         self.index = index
 
@@ -1264,7 +1264,7 @@ class HSPP(nn.Module):
     def forward(self, x):
         x = self.squeeze(x)
         pooled = [p(x) for p in self.maxpools] + [p(x) for p in self.avgpools]
-        x = torch.cat([x] + pooled, dim=1)
+        x = torch.cat([x, *pooled], dim=1)
         x = self.compress(x)
         return x
 
