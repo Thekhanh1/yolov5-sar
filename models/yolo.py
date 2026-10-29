@@ -14,6 +14,7 @@ import platform
 import sys
 from copy import deepcopy
 from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -28,6 +29,8 @@ from models.common import (
     C3,
     C3SPP,
     C3TR,
+    HSPP,
+    LCSP,
     SPP,
     SPPF,
     Bottleneck,
@@ -47,9 +50,12 @@ from models.common import (
     GhostBottleneck,
     GhostConv,
     Proto,
+    Select,
+    ca,
+    cbam,
+    se,
+    shuffleBackBone,
 )
-
-from models.common import Select, shuffleBackBone, LCSP, HSPP, se, cbam, ca
 from models.experimental import MixConv2d
 from utils.autoanchor import check_anchor_order
 from utils.general import LOGGER, check_version, check_yaml, colorstr, make_divisible, print_args
