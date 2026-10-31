@@ -1,4 +1,4 @@
-path: /content/ssdd_dataset/yolo_ssdd_dataset
+path: /content/ssdd_dataset/yolo_dataset_ssdd
 train: images/train
 val: images/val
 test: images/test
