@@ -2,79 +2,11 @@ import torch
 import torch.nn as nn
 
 
-class LConv(nn.Module):
-    def __init__(self, inputCh, outputCh, kernelSize=3, ratio=2, stride=1):
-        super().__init__()
-        self.m = outputCh // ratio
-
-        self.expensive_conv = nn.Conv2d(
-            inputCh, self.m, kernel_size=kernelSize, padding=kernelSize // 2, bias=False, stride=stride
-        )
-
-        self.cheap_conv = nn.Conv2d(
-            self.m, self.m * (ratio - 1), kernel_size=3, padding=1, groups=self.m, bias=False, stride=1
-        )
-
-    def forward(self, x):
-        y_prime = self.expensive_conv(x)
-        cheap_features = self.cheap_conv(y_prime)
-        out = torch.cat([y_prime, cheap_features], dim=1)
-        return out
-
-
-class LBL(nn.Module):
-    def __init__(self, inputCh, outputCh, kernelSize, stride=1):
-        super().__init__()
-        self.conv = LConv(inputCh, outputCh, kernelSize, stride=stride)
-        self.BNorm = nn.BatchNorm2d(outputCh)
-        self.activate = nn.LeakyReLU(0.1)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.BNorm(x)
-        x = self.activate(x)
-        return x
-
-
-class lBottleneck(nn.Module):
-    def __init__(self, inputCh):
-        super().__init__()
-        self.lbl1 = LBL(inputCh, inputCh, 1)
-        self.lbl2 = LBL(inputCh, inputCh, 3)
-
-    def forward(self, x):
-        x = self.lbl1(x)
-        residual = x
-        x = self.lbl2(x)
-        x = x + residual
-        return x
-
-
-class LCSP(nn.Module):
-    def __init__(self, inputCh, outputCh, n=1):
-        super().__init__()
-        self.branch1 = LBL(inputCh, inputCh // 2, 1)
-        self.branch2 = LBL(inputCh, inputCh // 2, 1)
-        self.bottleneck = nn.Sequential(*[lBottleneck(inputCh // 2) for _ in range(n)])
-        self.final = LBL(inputCh, outputCh, 1)
-
-    def forward(self, x):
-        x1 = self.branch1(x)
-        x2 = self.branch2(x)
-        x2 = self.bottleneck(x2)
-        x = torch.cat([x1, x2], dim=1)
-        x = self.final(x)
-        return x
-
-
-# print(LCSP(128, 128, n=3)(torch.randn(1, 128, 40, 40)).shape)
-
-
 class se(nn.Module):
     def __init__(self, inputCh, r=16):
         super().__init__()
         self.glPool = nn.AdaptiveAvgPool2d((1, 1))
-        self.mlp = nn.Sequential(
+        self.bottleNeck = nn.Sequential(
             nn.Conv2d(in_channels=inputCh, out_channels=inputCh // r, kernel_size=1, bias=False),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_channels=inputCh // r, out_channels=inputCh, kernel_size=1, bias=False),
@@ -188,4 +120,74 @@ class coordinateAttention(nn.Module):
         return y
 
 
-print(coordinateAttention(128, 32)(torch.randn(1, 128, 40, 40)).shape)
+# print(coordinateAttention(128, 32)(torch.randn(1, 128, 40, 40)).shape)
+
+
+class LConv(nn.Module):
+    def __init__(self, inputCh, outputCh, kernelSize=3, ratio=2, stride=1):
+        super().__init__()
+        self.m = outputCh // ratio
+
+        self.expensive_conv = nn.Conv2d(
+            inputCh, self.m, kernel_size=kernelSize, padding=kernelSize // 2, bias=False, stride=stride
+        )
+
+        self.cheap_conv = nn.Conv2d(
+            self.m, self.m * (ratio - 1), kernel_size=3, padding=1, groups=self.m, bias=False, stride=1
+        )
+
+    def forward(self, x):
+        y_prime = self.expensive_conv(x)
+        cheap_features = self.cheap_conv(y_prime)
+        out = torch.cat([y_prime, cheap_features], dim=1)
+        return out
+
+
+class LBL(nn.Module):
+    def __init__(self, inputCh, outputCh, kernelSize, stride=1):
+        super().__init__()
+        self.conv = LConv(inputCh, outputCh, kernelSize, stride=stride)
+        self.BNorm = nn.BatchNorm2d(outputCh)
+        self.activate = nn.LeakyReLU(0.1)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.BNorm(x)
+        x = self.activate(x)
+        return x
+
+
+class lBottleneck(nn.Module):
+    def __init__(self, inputCh):
+        super().__init__()
+        self.lbl1 = LBL(inputCh, inputCh, 1)
+        self.lbl2 = LBL(inputCh, inputCh, 3)
+
+    def forward(self, x):
+        x = self.lbl1(x)
+        residual = x
+        x = self.lbl2(x)
+        x = x + residual
+        return x
+
+
+class LCSP(nn.Module):
+    def __init__(self, inputCh, outputCh, n=1):
+        super().__init__()
+        self.branch1 = LBL(inputCh, inputCh // 2, 1)
+        self.branch2 = LBL(inputCh, inputCh // 2, 1)
+        self.bottleneck = nn.Sequential(*[lBottleneck(inputCh // 2) for _ in range(n)])
+        self.se = se(inputCh=inputCh // 2)
+        self.final = LBL(inputCh, outputCh, 1)
+
+    def forward(self, x):
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x2 = self.bottleneck(x2)
+        x2 = self.se(x2)
+        x = torch.cat([x1, x2], dim=1)
+        x = self.final(x)
+        return x
+
+
+print(LCSP(128, 128, n=3)(torch.randn(1, 128, 40, 40)).shape)
