@@ -1359,7 +1359,7 @@ class LCSP(nn.Module):
         self.branch1 = LBL(inputCh, hiddenCh, 1)
         self.branch2 = LBL(inputCh, hiddenCh, 1)
         self.bottleneck = nn.Sequential(*[lBottleneck(hiddenCh) for _ in range(n)])
-        self.se = se(hiddenCh // 2)
+        self.se = se(hiddenCh)
         self.final = LBL(outputCh, outputCh, 1)
 
     def forward(self, x):
