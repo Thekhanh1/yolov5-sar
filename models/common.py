@@ -1366,7 +1366,7 @@ class LCSP(nn.Module):
         x1 = self.branch1(x)
         x2 = self.branch2(x)
         x2 = self.bottleneck(x2)
-        x2 = self.se(x2)
+        x2 = self.cbam(x2)
         x = torch.cat([x1, x2], dim=1)
         x = self.final(x)
         return x
