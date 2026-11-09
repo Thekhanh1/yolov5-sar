@@ -1206,11 +1206,7 @@ class cbamSa(nn.Module):
 
     def forward(self, x):
         a = torch.cat([x.mean(dim=1, keepdim=True), x.amax(dim=1, keepdim=True)], dim=1)
-
-        a = self.conv7(a)
-        a = self.hardsigmoid(a)
-
-        return x * a
+        return self.hardsigmoid(self.conv7(a))
 
 
 class cbam(nn.Module):
